@@ -1,16 +1,27 @@
+#include <Servo.h>
 
-const byte triggerPin = 9;
-const byte echoPin = 8;
+Servo servo;
+
+const byte servoPin = 5;
+const unsigned int servoStartingPosition = 0;
+unsigned int servoCurrentPosition = 0;
+
+const byte triggerPin = 3;
+const byte echoPin = 2;
+
+const byte relayPin = 6;
 
 const unsigned int referenceDistance = 20;
-const byte maxSampleCount = 30;
+const byte maxSampleCount = 10;
 byte sampleCount = 0;
 
 unsigned int distance = 0;
 
 unsigned long timeElapsed = 0;
 unsigned long timeStarted = 0;
-unsigned int timeout = 5000;
+const unsigned int timeout = 5000;
+
+const unsigned int cleaningTimeout = 10000;
 
 bool hasStartedTimer = false;
 bool hasAlreadyBeenCleaned = false;
@@ -19,8 +30,9 @@ bool hasStartedSanitizing = false;
 
 void setup() {
   Serial.begin(9600);
-  pinMode(triggerPin, OUTPUT);
-  pinMode(echoPin, INPUT);
+  initServo();
+  initUltrasonic();
+  initRelay();
 }
 
 void loop() {
@@ -28,6 +40,17 @@ void loop() {
   getDistance();
   detectHand();
   sanitize();
+}
+
+void initServo() {
+  servo.attach(servoPin); 
+}
+void initUltrasonic() {
+  pinMode(triggerPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+}
+void initRelay() {
+   pinMode(relayPin, OUTPUT);
 }
 
 void detectHand() {
@@ -57,6 +80,7 @@ void detectHand() {
     // start sanitation
     if (timeElapsed - timeStarted >= timeout && hasStartedTimer) {
       Serial.println(F("Starting sanitation process now..."));
+      
       timeStarted = timeElapsed;
       hasStartedSanitizing = true;
       return;
@@ -82,14 +106,24 @@ void detectHand() {
 }
 
 void sanitize() {
+  if (!hasStartedSanitizing) {
+    return;
+  }
+
+  if (hasAlreadyBeenCleaned) {
+    return;
+  }
+
+  if (servoCurrentPosition == servoStartingPosition) {
+    servoCurrentPosition = 180;
+    rotateServo(180);
+    toggleUVLight(1);
+  }
+  
   // cleaning process is 30 seconds after the cleaner is fully retracted
-  if (timeElapsed - timeStarted >= (timeout * 2) && !hasAlreadyBeenCleaned && hasStartedSanitizing) {
+  if (timeElapsed - timeStarted >= cleaningTimeout) {
     timeStarted = timeElapsed;
-    hasAlreadyBeenCleaned = true;
-    hasStartedTimer = false;
-    hasStartedSanitizing = false;
-    sampleCount = 0;
-    Serial.println(F("Done cleaning!"));
+    resetSanitizer();
   }
 }
 
@@ -98,6 +132,22 @@ void getDistance() {
   delayMicroseconds(10);
   digitalWrite(triggerPin, LOW);
 
-  // returns distance in centimeters
+  // distance in centimeters
   distance = pulseIn(echoPin, HIGH) * ( 0.034 / 2);
+}
+void rotateServo(int angle) {
+  servo.write(angle);
+}
+void resetSanitizer() {
+  hasAlreadyBeenCleaned = true;
+  hasStartedTimer = false;
+  hasStartedSanitizing = false;
+  sampleCount = 0;
+  servoCurrentPosition = 0;
+  rotateServo(0);
+  toggleUVLight(0);
+  Serial.println(F("Done cleaning!"));
+}
+void toggleUVLight(bool state) {
+  digitalWrite(relayPin, state);
 }
