@@ -1,13 +1,9 @@
 #include <LiquidCrystal_I2C.h>
-#include <Servo.h>
 
 LiquidCrystal_I2C lcd = LiquidCrystal_I2C(0x27, 16, 2);
 
-Servo servo;
-
-const byte servoPin = 5;
-const unsigned int servoStartingPosition = 0;
-unsigned int servoCurrentPosition = 0;
+const byte motorIn1 = 8;
+const byte motorIn2 = 9;
 
 const byte triggerPin = 3;
 const byte echoPin = 2;
@@ -31,14 +27,27 @@ unsigned int remainingTimeBeforeCleaning = timeoutBeforeCleaning / 1000;
 const unsigned int cleaningTimeout = 15000;
 unsigned int remainingTime = cleaningTimeout / 1000;
 
+bool hasStartedToReset = false;
+
 bool hasStartedTimer = false;
-bool hasAlreadyBeenCleaned = false;
+bool haveBeenCleaned = false;
 bool hasStartedSanitizing = false;
+bool isDoneSanitizing = false;
+
+bool hasStartedSlidingForward = false;
+bool hasStartedSlidingBackward = false;
+bool startSlidingBackward = false;
+bool isDoneSlidingForward = false;
+bool isDoneSlidingBackward = false;
+unsigned long lastSlidForward = 0;
+unsigned long lastSlidBackward = 0;
+const unsigned int slideForwardDuration = 1100;
+const unsigned int slideBackwardDuration = 1000;
 
 void setup() {
   Serial.begin(9600);
   initLcd();
-  initServo();
+  initMotor();
   initUltrasonic();
   initRelay();
   showSystemIsReady();
@@ -49,6 +58,8 @@ void loop() {
   getDistance();
   detectHand();
   sanitize();
+  slideForward();
+  slideBackward();
 }
 
 void initLcd() {
@@ -57,9 +68,11 @@ void initLcd() {
   lcd.setCursor(0, 0);
   lcd.print("Initializing ...");
 }
-void initServo() {
-  servo.attach(servoPin); 
-  servo.write(0);
+void initMotor() {
+  pinMode(motorIn1, OUTPUT);
+  pinMode(motorIn2, OUTPUT);
+
+  motorSpinStop();
 }
 void initUltrasonic() {
   pinMode(triggerPin, OUTPUT);
@@ -115,7 +128,7 @@ void showWelcomeScreen() {
   lcd.print("Disinfection");
 }
 
-void detectHand() {
+void detectHand() {  
   // do not detect hand if sanitation have started
   if (hasStartedSanitizing) {
     return;
@@ -136,8 +149,8 @@ void detectHand() {
       return;
     }
 
-    // start timer
-    if (!hasAlreadyBeenCleaned && !hasStartedTimer) {
+    // start countdown before cleaning
+    if (!haveBeenCleaned && !hasStartedTimer) {
       Serial.print(F("Timer starts now: "));
       Serial.println(timeElapsed);
 
@@ -154,12 +167,13 @@ void detectHand() {
       Serial.print(F("Remaining time before cleaning: "));
       Serial.println(remainingTimeBeforeCleaning);
 
+      // show countdown timer (i.e. before starting the sanitation process)
       showRemainingTimeBeforeCleaning();
 
-      // start sanitation
+      // countdown is done
       if (remainingTimeBeforeCleaning <= 0) {
+        // set flag to start sanitation process
         hasStartedSanitizing = true;
-        showSanitizingScreen();
         return;
       }
 
@@ -176,7 +190,7 @@ void detectHand() {
     
     sampleCount = 0;
     hasStartedTimer = false;
-    hasAlreadyBeenCleaned = false;
+    haveBeenCleaned = false;
     remainingTimeBeforeCleaning = timeoutBeforeCleaning / 1000;
     
     // else increment samples
@@ -192,27 +206,75 @@ void sanitize() {
     return;
   }
 
-  if (hasAlreadyBeenCleaned) {
+  // wait to fully slide forward before starting countdown
+  if (!isDoneSlidingForward) {
     return;
   }
 
-  // show remaing time
-  if (timeElapsed - timeStartedTicking >= 1000) {
+  // show remaining time
+  if (timeElapsed - timeStartedTicking >= 1000 && !hasStartedToReset) {
     timeStartedTicking = timeElapsed;
+    
     showRemainingTime();
-    remainingTime--;
-  }
 
-  if (servoCurrentPosition == servoStartingPosition) {
-    servoCurrentPosition = 180;
-    rotateServo(180);
-    toggleUVLight(1);
+    // countdown is done
+    if (remainingTime <= 0) {
+      // set flag to start the reset process
+      // (i.e. to reset all flags to default state)
+      hasStartedToReset = true;
+      return;
+    }
+    
+    remainingTime--;
   }
   
   // done sanitizing
-  if (timeElapsed - timeStarted >= cleaningTimeout) {
-    timeStarted = timeElapsed;
+  if (timeElapsed - timeStarted >= cleaningTimeout && hasStartedToReset) {
+    // set flag that sanitation is done
+    isDoneSanitizing = true;
+  }
+}
+
+void slideForward() {
+  if (!hasStartedSanitizing) {
+    return;
+  }
+  
+  if (!hasStartedSlidingForward) {
+    Serial.println("Start slide now!");
+    lastSlidForward = timeElapsed;
+    hasStartedSlidingForward = true;
+    motorSpinClockwise();
+    return;
+  }
+
+  if (timeElapsed - lastSlidForward >= slideForwardDuration && !isDoneSlidingForward) {
+    isDoneSlidingForward = true;
+    toggleUVLight(1);
+    showSanitizingScreen();
+    motorSpinStop();
+    Serial.println("Done sliding forward");
+  }
+}
+void slideBackward() {
+  if (!isDoneSanitizing) {
+    return;
+  }
+
+  if (!hasStartedSlidingBackward) {
+    lastSlidBackward = timeElapsed;
+    hasStartedSlidingBackward = true;
+    toggleUVLight(0);
+    motorSpinCounterClockwise();
+    Serial.println("Time to slide back!");
+  }
+  
+  if (timeElapsed - lastSlidBackward >= slideBackwardDuration && !isDoneSlidingBackward) {
+    isDoneSlidingBackward = true;
+    showDoneSanitizing();
     resetSanitizer();
+    motorSpinStop();
+    Serial.println("Done sliding backward");
   }
 }
 
@@ -224,24 +286,42 @@ void getDistance() {
   // distance in centimeters
   distance = pulseIn(echoPin, HIGH) * ( 0.034 / 2);
 }
-void rotateServo(int angle) {
-  servo.write(angle);
+
+void motorSpinClockwise() {
+  digitalWrite(motorIn1, HIGH);
+  digitalWrite(motorIn2, LOW);
 }
+void motorSpinCounterClockwise() {
+  digitalWrite(motorIn1, LOW);
+  digitalWrite(motorIn2, HIGH);
+}
+void motorSpinStop() {
+  digitalWrite(motorIn1, LOW);
+  digitalWrite(motorIn2, LOW);
+}
+
 void resetSanitizer() {
-  showDoneSanitizing();
-  lastSanitizedTime = timeElapsed;
-  hasAlreadyBeenCleaned = true;
+  // slide forward flags
+  hasStartedSlidingForward = false;
+  isDoneSlidingForward = false;
+
+  // slide backward flags
+  hasStartedSlidingBackward = false;
+  isDoneSlidingBackward = false;
+
+  // sanitizer flags
+  isDoneSanitizing = false;
+  hasStartedToReset = false; 
+  haveBeenCleaned = true;
   hasStartedTimer = false;
   hasStartedSanitizing = false;
+
+  // reset countdown values
   remainingTimeBeforeCleaning = timeoutBeforeCleaning / 1000;
   remainingTime = cleaningTimeout / 1000;
-  sampleCount = 0;
-  servoCurrentPosition = 0;
-  rotateServo(0);
-  toggleUVLight(0);
 
-  Serial.println(remainingTimeBeforeCleaning);
-  Serial.println(F("Done sanitizing!"));
+  // set time to delay welcome screen after sanitation
+  lastSanitizedTime = timeElapsed;
 }
 void toggleUVLight(bool state) {
   digitalWrite(relayPin, state);
